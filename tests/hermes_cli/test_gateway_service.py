@@ -577,6 +577,35 @@ class TestLaunchdServiceRecovery:
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
         assert gateway_cli._launchd_domain() == "user/501"
 
+    def test_spawn_detached_gateway_uses_project_root_cwd(self, tmp_path, monkeypatch):
+        log_dir = tmp_path / "logs"
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_gateway_run_command",
+            lambda: ["python", "-m", "hermes_cli.main", "gateway", "run", "--replace"],
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "windows_detach_popen_kwargs",
+            lambda: {"start_new_session": True},
+            raising=False,
+        )
+
+        calls = []
+
+        def fake_popen(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return SimpleNamespace(pid=123)
+
+        monkeypatch.setattr(gateway_cli.subprocess, "Popen", fake_popen)
+
+        assert gateway_cli._spawn_detached_gateway() is True
+        assert log_dir.exists()
+        assert calls
+        _, kwargs = calls[0]
+        assert kwargs["cwd"] == str(gateway_cli.PROJECT_ROOT)
+
 
 
     # ── PID parsing ──────────────────────────────────────────────────────
@@ -1961,14 +1990,24 @@ class TestGatewayCommandCatchesSystemScopeError:
 
 
 class TestServiceWorkingDirIsStable:
-    """The gateway service must anchor WorkingDirectory at a stable path
-    (HERMES_HOME), never the source checkout / worktree, so a relocated or
-    deleted checkout can't crash-loop the unit on CHDIR (status=200).
+    """Jordan's gateway service must use the canonical checkout as its cwd.
+
+    The boot cwd identifies the live runtime tree for project-context loading
+    and operator diagnostics; HERMES_HOME remains the state/config root.
     """
 
+    def test_stable_working_dir_uses_project_root(self, tmp_path, monkeypatch):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: home)
+        assert gateway_cli._stable_service_working_dir() == str(gateway_cli.PROJECT_ROOT)
 
+    def test_stable_working_dir_ignores_missing_hermes_home(self, tmp_path, monkeypatch):
+        missing = tmp_path / "does-not-exist" / ".hermes"
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: missing)
+        assert gateway_cli._stable_service_working_dir() == str(gateway_cli.PROJECT_ROOT)
 
-    def test_user_unit_workingdirectory_is_hermes_home_not_checkout(self, tmp_path, monkeypatch):
+    def test_user_unit_workingdirectory_is_project_root(self, tmp_path, monkeypatch):
         home = tmp_path / ".hermes"
         home.mkdir()
         monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: home)
@@ -1976,11 +2015,10 @@ class TestServiceWorkingDirIsStable:
         wd = [l for l in unit.splitlines() if l.startswith("WorkingDirectory=")]
         assert wd, "unit has no WorkingDirectory line"
         value = wd[0].split("=", 1)[1]
-        assert Path(value).resolve() == home.resolve()
-        # The bug class: never pin cwd inside a transient worktree checkout.
+        assert Path(value).resolve() == gateway_cli.PROJECT_ROOT.resolve()
         assert "/.worktrees/" not in value
 
-    def test_launchd_workingdirectory_is_hermes_home(self, tmp_path, monkeypatch):
+    def test_launchd_workingdirectory_is_project_root(self, tmp_path, monkeypatch):
         import re
 
         home = tmp_path / ".hermes"
@@ -1989,7 +2027,7 @@ class TestServiceWorkingDirIsStable:
         plist = gateway_cli.generate_launchd_plist()
         m = re.search(r"<key>WorkingDirectory</key>\s*<string>(.*?)</string>", plist)
         assert m, "plist has no WorkingDirectory entry"
-        assert Path(m.group(1)).resolve() == home.resolve()
+        assert Path(m.group(1)).resolve() == gateway_cli.PROJECT_ROOT.resolve()
         assert "/.worktrees/" not in m.group(1)
 
 
