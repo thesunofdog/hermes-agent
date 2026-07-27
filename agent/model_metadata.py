@@ -749,6 +749,13 @@ def _infer_provider_from_url(base_url: str) -> Optional[str]:
     if not normalized:
         return None
     parsed = urlparse(normalized if "://" in normalized else f"https://{normalized}")
+    hostname = (parsed.hostname or "").lower()
+    path = (parsed.path or "").lower().rstrip("/")
+    if hostname == "chatgpt.com" and (
+        path == "/backend-api/codex"
+        or path.startswith("/backend-api/codex/")
+    ):
+        return "openai-codex"
     host = parsed.netloc.lower() or parsed.path.lower()
     for url_part, provider in _URL_TO_PROVIDER.items():
         if url_part in host:
@@ -827,7 +834,12 @@ def _skip_persistent_context_cache(base_url: str, provider: str) -> bool:
     endpoint. A fallback value written after a transient probe failure must
     not prevent a later live probe from observing an updated allocation.
     """
-    return (provider or "").strip().lower() in {"lmstudio", "openai-codex"}
+    normalized_provider = (provider or "").strip().lower()
+    if normalized_provider in {"", "openrouter", "custom"} and base_url:
+        inferred = _infer_provider_from_url(base_url)
+        if inferred:
+            normalized_provider = inferred
+    return normalized_provider in {"lmstudio", "openai-codex"}
 
 
 def _maybe_cache_local_context_length(

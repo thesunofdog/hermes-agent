@@ -442,6 +442,50 @@ class TestCodexOAuthContextLength:
             for key in mm._codex_oauth_context_cache
         )
 
+    def test_codex_url_inference_is_path_aware(self):
+        from agent.model_metadata import _infer_provider_from_url
+
+        assert _infer_provider_from_url(
+            "https://chatgpt.com/backend-api/codex"
+        ) == "openai-codex"
+        assert _infer_provider_from_url(
+            "https://chatgpt.com/backend-api/conversation"
+        ) == "openai"
+        assert _infer_provider_from_url("https://api.openai.com/v1") == "openai"
+
+    def test_inferred_codex_route_refreshes_authenticated_cache(
+        self, tmp_path, monkeypatch
+    ):
+        from agent import model_metadata as mm
+
+        cache_file = tmp_path / "context_length_cache.yaml"
+        monkeypatch.setattr(mm, "_get_context_cache_path", lambda: cache_file)
+
+        base_url = "https://chatgpt.com/backend-api/codex"
+        import yaml as _yaml
+        cache_file.write_text(_yaml.dump({"context_lengths": {
+            f"gpt-5.6-sol@{base_url}": 272_000,
+        }}))
+
+        live_response = MagicMock()
+        live_response.status_code = 200
+        live_response.json.return_value = {
+            "models": [{"slug": "gpt-5.6-sol", "context_window": 372_000}]
+        }
+
+        with patch(
+            "agent.model_metadata.requests.get", return_value=live_response
+        ) as mock_get:
+            ctx = mm.get_model_context_length(
+                model="gpt-5.6-sol",
+                base_url=base_url,
+                api_key="inferred-route-token",
+                provider="custom",
+            )
+
+        assert ctx == 372_000
+        mock_get.assert_called_once()
+
     def test_probe_failure_falls_back_to_hardcoded(self):
         """If the probe fails (non-200 / network error), we still return
         the hardcoded 272k rather than leaking through to models.dev 1.05M."""
